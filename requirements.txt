@@ -1,0 +1,21 @@
+# Pipecat core — latest pre-1.0 release
+pipecat-ai==0.0.99
+
+# Web server
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+loguru>=0.7.0
+
+# AI service SDKs (installed separately to avoid broken extras)
+openai>=1.74.0
+deepgram-sdk>=3.2.7,<4.0.0
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# WebSocket support
+websockets>=12.0
+
+# Direct SIP calling (no Asterisk needed)
+pyVoIP>=1.6.8
