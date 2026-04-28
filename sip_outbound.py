@@ -496,9 +496,8 @@ async def _bridge_call(call, to_number: str, from_number: str, loop):
                 if not pcm8u:
                     await asyncio.sleep(0.01)
                     continue
-                pcm8s  = audioop.bias(pcm8u, 1, -128)   # unsigned → signed
-                pcm16  = audioop.lin2lin(pcm8s, 1, 2)   # 8-bit → 16-bit signed
-                mulaw  = audioop.lin2ulaw(pcm16, 2)      # → standard μ-law
+                pcm8s = audioop.bias(pcm8u, 1, -128)   # unsigned → signed
+                mulaw = audioop.lin2ulaw(pcm8s, 1)      # 8-bit signed → μ-law (no upscale needed)
                 seq += 1
                 await ws.send(json.dumps({
                     "event":     "media",
