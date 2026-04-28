@@ -533,11 +533,12 @@ async def _bridge_call(call, to_number: str, from_number: str, loop):
                     payload_b64 = msg.get("media", {}).get("payload", "")
                     if not payload_b64:
                         continue
-                    mulaw16 = base64.b64decode(payload_b64)
-                    pcm16   = audioop.ulaw2lin(mulaw16, 2)   # → signed 16-bit
-                    pcm8s   = audioop.lin2lin(pcm16, 2, 1)   # → signed 8-bit
-                    # writeAudio expects UNSIGNED 8-bit (silence=128)
-                    pcm8u   = audioop.bias(pcm8s, 1, 128)    # signed → unsigned
+                    mulaw = base64.b64decode(payload_b64)
+                    # μ-law is natively 8-bit: decode directly to signed 8-bit,
+                    # then add 128 to give pyVoIP the unsigned format it expects.
+                    # Avoids the lossy 16-bit intermediate that lin2lin would truncate.
+                    pcm8s = audioop.ulaw2lin(mulaw, 1)   # μ-law → signed 8-bit
+                    pcm8u = audioop.bias(pcm8s, 1, 128)  # signed → unsigned (silence=128)
                     await loop.run_in_executor(None, call.writeAudio, pcm8u)
                 elif event in ("stop", "disconnect"):
                     logger.info("Pipecat sent stop — ending call")
