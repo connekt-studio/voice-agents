@@ -489,12 +489,14 @@ async def _bridge_call(call, to_number: str, from_number: str, loop):
         nonlocal seq
         try:
             while call.state == CallState.ANSWERED:
-                # readAudio returns raw 16-bit PCM at 8 kHz (160 samples = 20 ms)
-                pcm = await loop.run_in_executor(None, call.readAudio, 160)
-                if not pcm:
+                # readAudio returns 8-bit PCM (width=1) — pyVoIP decodes μ-law with audioop.ulaw2lin(data, 1)
+                pcm8 = await loop.run_in_executor(None, call.readAudio, 160)
+                if not pcm8:
                     await asyncio.sleep(0.01)
                     continue
-                mulaw = audioop.lin2ulaw(pcm, 2)
+                # Upscale 8-bit → 16-bit PCM for Pipecat's ulaw_to_pcm/STT pipeline
+                pcm16 = audioop.lin2lin(pcm8, 1, 2)
+                mulaw = audioop.lin2ulaw(pcm16, 2)  # encode as 16-bit μ-law for transport
                 seq += 1
                 await ws.send(json.dumps({
                     "event":     "media",
@@ -514,20 +516,35 @@ async def _bridge_call(call, to_number: str, from_number: str, loop):
                 pass
 
     # ── WebSocket (Pipecat TTS) → SIP RTP ────────────────────────────────────
+    # TTS audio arrives faster than real-time.  We pace writes to pyVoIP
+    # at the RTP rate (20 ms per 160-sample 8-bit chunk) so the RTP sender
+    # doesn't burst-send a full TTS response and cause jitter/skipping.
+    CHUNK_SAMPLES  = 160                   # 20 ms at 8 kHz
+    CHUNK_DURATION = CHUNK_SAMPLES / 8000  # 0.020 s
+
     async def ws_to_sip():
         try:
             async for raw in ws:
                 try:
                     msg = json.loads(raw)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 event = msg.get("event", "")
                 if event == "media":
                     payload_b64 = msg.get("media", {}).get("payload", "")
-                    if payload_b64:
-                        mulaw = base64.b64decode(payload_b64)
-                        pcm   = audioop.ulaw2lin(mulaw, 2)
-                        await loop.run_in_executor(None, call.writeAudio, pcm)
+                    if not payload_b64:
+                        continue
+                    mulaw16 = base64.b64decode(payload_b64)
+                    pcm16   = audioop.ulaw2lin(mulaw16, 2)
+                    pcm8    = audioop.lin2lin(pcm16, 2, 1)
+
+                    # Write in 160-byte chunks, sleeping 20 ms between each
+                    # so pyVoIP's RTP sender stays in sync with real time.
+                    for i in range(0, len(pcm8), CHUNK_SAMPLES):
+                        chunk = pcm8[i : i + CHUNK_SAMPLES]
+                        await loop.run_in_executor(None, call.writeAudio, chunk)
+                        await asyncio.sleep(CHUNK_DURATION)
+
                 elif event in ("stop", "disconnect"):
                     logger.info("Pipecat sent stop — ending call")
                     break
@@ -537,5 +554,6 @@ async def _bridge_call(call, to_number: str, from_number: str, loop):
             if call.state == CallState.ANSWERED:
                 await loop.run_in_executor(None, call.hangup)
             logger.info(f"Outbound call to {to_number} ended")
+
 
     await asyncio.gather(sip_to_ws(), ws_to_sip())
