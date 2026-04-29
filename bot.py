@@ -231,9 +231,20 @@ async def run_bot(websocket, call_data: dict | None = None):
     async def on_connected(transport, websocket):
         logger.info("━" * 60)
         logger.info("📲  EVENT: Client WebSocket connected!")
-        logger.info("    → Sending initial greeting prompt to pipeline")
+        logger.info("    → Sending instant greeting + LLM context to pipeline")
         logger.info("━" * 60)
-        await task.queue_frames([context_aggregator.user().get_context_frame()])
+        from pipecat.frames.frames import TTSSpeakFrame
+        # Send an instant TTS greeting (bypasses LLM latency — caller hears
+        # something within ~500ms instead of waiting 3-5s for LLM + TTS).
+        greeting = (
+            "Hello! This is your AI customer service assistant. "
+            "How can I help you today?"
+        )
+        await task.queue_frames([
+            TTSSpeakFrame(text=greeting),
+            context_aggregator.user().get_context_frame(),
+        ])
+
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(transport, websocket):
