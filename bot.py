@@ -14,8 +14,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.services.deepgram.stt import DeepgramSTTService
 from sarvam_tts import SarvamTTSService
+from sarvam_stt import SarvamSTTService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -111,15 +111,16 @@ async def run_bot(websocket, call_data: dict | None = None):
     # ══════════════════════════════════════════════════════════════════
     # STEP 4 — AI services
     # ══════════════════════════════════════════════════════════════════
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        model="nova-3",
-        language="multi",
+    stt = SarvamSTTService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        language="bn-IN",
+        model="saaras:v3",
+        sample_rate=8000,
     )
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-4o",
+        model="gpt-4.1-mini",
     )
 
     tts = SarvamTTSService(
