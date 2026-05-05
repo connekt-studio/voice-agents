@@ -15,6 +15,7 @@ Requirements:
 import asyncio
 import io
 import os
+import time
 from typing import AsyncGenerator
 
 import requests
@@ -29,6 +30,10 @@ from pipecat.frames.frames import (
     TTSStoppedFrame,
 )
 from pipecat.services.tts_service import TTSService
+
+# Retry config for transient Sarvam API errors
+_MAX_RETRIES = 3
+_BACKOFF_BASE_S = 0.5   # 0.5 → 1.0 → 2.0 seconds
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -93,7 +98,11 @@ class SarvamTTSService(TTSService):
     # ------------------------------------------------------------------
 
     def _call_sarvam_sync(self, text: str) -> bytes:
-        """Blocking HTTP call that returns the full MP3 payload."""
+        """
+        Blocking HTTP call that returns the full MP3 payload.
+        Retries up to _MAX_RETRIES times with exponential backoff on transient errors.
+        4xx errors are permanent and not retried.
+        """
         headers = {
             "api-subscription-key": self._api_key,
             "Content-Type": "application/json",
@@ -109,25 +118,46 @@ class SarvamTTSService(TTSService):
             "enable_preprocessing": True,
         }
 
-        logger.debug(f"[SarvamTTS] POST {self.API_URL} | text={text[:60]!r}…")
-        mp3_chunks: list[bytes] = []
+        last_exc: Exception | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                logger.debug(f"[SarvamTTS] POST attempt {attempt}/{_MAX_RETRIES} | text={text[:60]!r}…")
+                mp3_chunks: list[bytes] = []
 
-        with requests.post(
-            self.API_URL,
-            headers=headers,
-            json=payload,
-            stream=True,
-            timeout=30,
-        ) as resp:
-            resp.raise_for_status()
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    mp3_chunks.append(chunk)
-                    logger.debug(f"[SarvamTTS] received {len(chunk)} bytes")
+                with requests.post(
+                    self.API_URL,
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=30,
+                ) as resp:
+                    resp.raise_for_status()
+                    for chunk in resp.iter_content(chunk_size=8192):
+                        if chunk:
+                            mp3_chunks.append(chunk)
 
-        mp3_data = b"".join(mp3_chunks)
-        logger.debug(f"[SarvamTTS] total MP3 size: {len(mp3_data)} bytes")
-        return mp3_data
+                mp3_data = b"".join(mp3_chunks)
+                logger.debug(f"[SarvamTTS] total MP3: {len(mp3_data)} bytes (attempt {attempt})")
+                return mp3_data
+
+            except requests.HTTPError as exc:
+                # 4xx errors are permanent — don't retry
+                if exc.response is not None and exc.response.status_code < 500:
+                    raise
+                last_exc = exc
+                logger.warning(
+                    f"[SarvamTTS] HTTP {exc.response.status_code} on attempt {attempt}, retrying…"
+                )
+            except requests.RequestException as exc:
+                last_exc = exc
+                logger.warning(f"[SarvamTTS] network error on attempt {attempt}: {exc}, retrying…")
+
+            if attempt < _MAX_RETRIES:
+                delay = _BACKOFF_BASE_S * (2 ** (attempt - 1))
+                logger.debug(f"[SarvamTTS] backoff {delay:.1f}s")
+                time.sleep(delay)
+
+        raise last_exc or RuntimeError("SarvamTTS: all retries exhausted")
 
     # ------------------------------------------------------------------
     # MP3 → 8 kHz mono PCM16 conversion

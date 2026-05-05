@@ -4,6 +4,7 @@ import os
 import sys
 import argparse
 import json
+from datetime import datetime
 
 from loguru import logger
 from dotenv import load_dotenv
@@ -22,62 +23,74 @@ from pipecat.transports.websocket.fastapi import (
 )
 from alpha_pbx_serializer import AlphaPBXSerializer
 
+from services.call_data import CallData
+from services.event_logger import fire_event
+from services.idle_handler import IdleHandler
+from services.vad_service import VADService
+from services import db, slack_service
+
 load_dotenv(override=True)
-
-# ─── Logging ───────────────────────────────────────────────────────────────────
-logger.remove()
-logger.add(sys.stderr, level="DEBUG")
-
 
 # ─── System Prompt ─────────────────────────────────────────────────────────────
 _PROMPT_FILE = os.path.join(os.path.dirname(__file__), "prompt.md")
-SYSTEM_PROMPT = open(_PROMPT_FILE, encoding="utf-8").read()
+_BASE_PROMPT = open(_PROMPT_FILE, encoding="utf-8").read()
+
+
+def _build_system_prompt() -> str:
+    """Append live date/time so the bot always knows today's date."""
+    now = datetime.now()
+    date_ctx = (
+        f"\n\n---\nআজকের তারিখ: {now.strftime('%Y-%m-%d')} "
+        f"| সময়: {now.strftime('%H:%M')}"
+    )
+    return _BASE_PROMPT + date_ctx
 
 
 async def run_bot(websocket, call_data: dict | None = None):
     """
-    Entry-point called by server.py for every incoming WebSocket connection
-    from pbx.bd (or any SIP/WebSocket bridge).
+    Entry-point called by server.py for every incoming WebSocket connection.
     """
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 1 — Call received
+    # STEP 1 — Extract call metadata into passive CallData object
     # ══════════════════════════════════════════════════════════════════
-    stream_sid    = (call_data or {}).get("stream_sid", "unknown")
-    call_sid      = (call_data or {}).get("call_sid",   "unknown")
-    caller_number = (call_data or {}).get("from", "unknown")
-    called_number = (call_data or {}).get("to",   "unknown")
-    call_type     = (call_data or {}).get("call_type", "inbound")
+    raw = call_data or {}
+    call = CallData(
+        call_sid=raw.get("call_sid", "unknown"),
+        stream_sid=raw.get("stream_sid", "unknown"),
+        caller_number=raw.get("from", "unknown"),
+        called_number=raw.get("to", "unknown"),
+        call_type=raw.get("call_type", "inbound"),
+    )
 
     logger.info("━" * 60)
-    logger.info("📞  STEP 1 — New call received")
-    logger.info(f"    call_sid     : {call_sid}")
-    logger.info(f"    stream_sid   : {stream_sid}")
-    logger.info(f"    caller number: {caller_number}")
-    logger.info(f"    called number: {called_number}")
-    logger.info(f"    call type    : {call_type}")
+    logger.info("📞  New call received")
+    logger.info(f"    call_sid     : {call.call_sid}")
+    logger.info(f"    stream_sid   : {call.stream_sid}")
+    logger.info(f"    caller number: {call.caller_number}")
+    logger.info(f"    called number: {call.called_number}")
+    logger.info(f"    call type    : {call.call_type}")
     logger.info(f"    SIP server   : {os.getenv('PBX_SIP_SERVER', 'connektstudio.alphapbx.net')}")
     logger.info(f"    extension    : {os.getenv('PBX_EXTENSION', '101')}")
     logger.info(f"    DID          : {os.getenv('PBX_DID_NUMBER', '09647664295')}")
     logger.info("━" * 60)
 
-    # ══════════════════════════════════════════════════════════════════
-    # STEP 2 — Create audio serializer (μ-law ↔ PCM codec for Alpha PBX)
-    # ══════════════════════════════════════════════════════════════════
-    logger.info("🔧  STEP 2 — Creating AlphaPBXSerializer (raw μ-law for Alpha PBX SIP — no Twilio)")
-    serializer = AlphaPBXSerializer(
-        sample_rate=8000,
-        num_channels=1,
-    )
-    logger.info("    ✅ Serializer ready (Alpha PBX SIP — no Twilio credentials needed)")
+    fire_event(call.call_sid, "call_received", {
+        "caller": call.caller_number,
+        "called": call.called_number,
+        "type": call.call_type,
+    })
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 3 — Set up WebSocket transport
+    # STEP 2 — Audio serializer (μ-law ↔ PCM codec for Alpha PBX)
     # ══════════════════════════════════════════════════════════════════
-    logger.info("🔌  STEP 3 — Setting up FastAPI WebSocket transport")
-    logger.info("    audio_in : enabled  (8 kHz μ-law from SIP bridge)")
-    logger.info("    audio_out: enabled  (8 kHz μ-law to SIP bridge)")
-    logger.info("    VAD      : Silero   (voice activity detection)")
+    serializer = AlphaPBXSerializer(sample_rate=8000, num_channels=1)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 3 — WebSocket transport + VAD service
+    # ══════════════════════════════════════════════════════════════════
+    vad_analyzer = SileroVADAnalyzer()
+    vad_svc = VADService(vad_analyzer)
 
     transport = FastAPIWebsocketTransport(
         websocket=websocket,
@@ -86,39 +99,26 @@ async def run_bot(websocket, call_data: dict | None = None):
             audio_out_enabled=True,
             add_wav_header=False,
             vad_enabled=True,
-            vad_analyzer=SileroVADAnalyzer(),
+            vad_analyzer=vad_analyzer,
             vad_audio_passthrough=True,
             serializer=serializer,
         ),
     )
-    logger.info("    ✅ Transport ready")
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 4 — Initialize AI services
+    # STEP 4 — AI services
     # ══════════════════════════════════════════════════════════════════
-    logger.info("🎤  STEP 4a — Initializing Deepgram STT (Speech → Text)")
-    logger.info("    model   : nova-3")
-    logger.info("    language: multi  (Bangla + English auto-detect)")
     stt = DeepgramSTTService(
         api_key=os.getenv("DEEPGRAM_API_KEY"),
         model="nova-3",
         language="multi",
     )
-    logger.info("    ✅ STT ready")
 
-    logger.info("🧠  STEP 4b — Initializing OpenAI LLM (Text → Text)")
-    logger.info("    model: gpt-4o")
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
         model="gpt-4o",
     )
-    logger.info("    ✅ LLM ready")
 
-    logger.info("🔊  STEP 4c — Initializing Sarvam TTS (Text → Bangla Speech)")
-    logger.info("    model      : bulbul:v3")
-    logger.info("    speaker    : pooja")
-    logger.info("    language   : bn-IN")
-    logger.info("    sample_rate: 8000 Hz")
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
         speaker="pooja",
@@ -127,50 +127,32 @@ async def run_bot(websocket, call_data: dict | None = None):
         pace=1.0,
         sample_rate=8000,
     )
-    logger.info("    ✅ Sarvam TTS ready")
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 5 — Build conversation context
+    # STEP 5 — Conversation context with live date/time injection
     # ══════════════════════════════════════════════════════════════════
-    logger.info("💬  STEP 5 — Building conversation context")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    logger.info("    ✅ System prompt loaded")
+    messages = [{"role": "system", "content": _build_system_prompt()}]
 
-    if call_type == "outbound":
+    if call.call_type == "outbound":
         messages.append({
             "role": "system",
             "content": (
-                f"You initiated this call to {called_number}. "
-                "Greet them first with a warm introduction explaining why you are calling."
+                f"আপনি {call.called_number} নম্বরে কল করেছেন। "
+                "উষ্ণ পরিচয় দিয়ে শুরু করুন।"
             ),
         })
-        logger.info(f"    ✅ Outbound context added: calling {called_number}")
-    elif caller_number and caller_number != "unknown":
+    elif call.caller_number and call.caller_number != "unknown":
         messages.append({
             "role": "system",
-            "content": f"The caller's phone number is {caller_number}.",
+            "content": f"কলারের ফোন নম্বর: {call.caller_number}।",
         })
-        logger.info(f"    ✅ Caller info added: {caller_number}")
-    else:
-        logger.info("    ℹ️  No caller number — using generic greeting")
 
-    context            = OpenAILLMContext(messages)
+    context = OpenAILLMContext(messages)
     context_aggregator = llm.create_context_aggregator(context)
-    logger.info("    ✅ Context aggregator ready")
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 6 — Assemble the pipeline
+    # STEP 6 — Pipeline
     # ══════════════════════════════════════════════════════════════════
-    logger.info("⚙️   STEP 6 — Assembling pipeline")
-    logger.info("    WebSocket audio in")
-    logger.info("    → Silero VAD  (detects when user is speaking)")
-    logger.info("    → Deepgram STT  (speech → text)")
-    logger.info("    → LLM context user aggregator")
-    logger.info("    → OpenAI GPT-4o  (generates reply)")
-    logger.info("    → Sarvam TTS bulbul:v3  (text → Bangla speech)")
-    logger.info("    → WebSocket audio out")
-    logger.info("    → LLM context assistant aggregator")
-
     pipeline = Pipeline([
         transport.input(),
         stt,
@@ -180,16 +162,10 @@ async def run_bot(websocket, call_data: dict | None = None):
         transport.output(),
         context_aggregator.assistant(),
     ])
-    logger.info("    ✅ Pipeline assembled (7 stages)")
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 7 — Create pipeline task
+    # STEP 7 — Pipeline task
     # ══════════════════════════════════════════════════════════════════
-    logger.info("📋  STEP 7 — Creating PipelineTask")
-    logger.info("    allow_interruptions : True  (caller can cut off bot)")
-    logger.info("    enable_metrics      : True")
-    logger.info("    audio sample rate   : 8000 Hz in/out")
-
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -200,22 +176,24 @@ async def run_bot(websocket, call_data: dict | None = None):
             audio_out_sample_rate=8000,
         ),
     )
-    logger.info("    ✅ Task created")
+
+    idle_handler = IdleHandler(task)
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 8 — Register event handlers
+    # STEP 8 — Event handlers
     # ══════════════════════════════════════════════════════════════════
-    logger.info("🎯  STEP 8 — Registering event handlers")
 
     @transport.event_handler("on_client_connected")
     async def on_connected(transport, websocket):
         logger.info("━" * 60)
-        logger.info("📲  EVENT: Client WebSocket connected!")
-        logger.info("    → Sending instant greeting + LLM context to pipeline")
+        logger.info("📲  Client connected — sending greeting")
         logger.info("━" * 60)
+
+        fire_event(call.call_sid, "client_connected", {"caller": call.caller_number})
+        await slack_service.post_call_started(call.call_sid, call.caller_number, call.call_type)
+
         from pipecat.frames.frames import TTSSpeakFrame
-        # Send an instant TTS greeting (bypasses LLM latency — caller hears
-        # something within ~500ms instead of waiting 3-5s for LLM + TTS).
+        # Instant TTS greeting bypasses LLM latency — caller hears audio in ~500ms
         greeting = (
             "আসসালামু আলাইকুম! আমি আপনার AI কাস্টমার সার্ভিস সহকারী। "
             "আজকে আমি আপনাকে কীভাবে সাহায্য করতে পারি?"
@@ -224,39 +202,61 @@ async def run_bot(websocket, call_data: dict | None = None):
             TTSSpeakFrame(text=greeting),
             context_aggregator.user().get_context_frame(),
         ])
-
+        # Start silence detection after greeting is queued
+        idle_handler.arm()
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(transport, websocket):
         logger.info("━" * 60)
-        logger.info("📴  EVENT: Client WebSocket disconnected — call ended")
-        logger.info("    → Cancelling pipeline task")
+        logger.info("📴  Client disconnected — call ended")
         logger.info("━" * 60)
+
+        idle_handler.reset()
+
+        # Capture transcript from LLM context messages
+        for msg in context.messages:
+            role = msg.get("role", "")
+            if role in ("user", "assistant"):
+                text = msg.get("content", "")
+                if isinstance(text, str) and text.strip():
+                    call.add_transcript(role, text)
+
+        call.mark_ended("completed")
+
+        fire_event(call.call_sid, "call_ended", {
+            "status": call.status,
+            "started_at": call.started_at,
+            "ended_at": call.ended_at,
+            "error_counters": call.error_counters,
+        })
+
+        # Fire-and-forget persistence — never blocks the disconnect handler
+        await db.save_call(call.to_dict())
+        await slack_service.post_call_ended(
+            call.call_sid,
+            call.status,
+            [f"{t.role}: {t.text}" for t in call.transcripts],
+            call.error_counters,
+        )
+
         await task.cancel()
 
-    logger.info("    ✅ Handlers registered (on_client_connected / on_client_disconnected)")
-
     # ══════════════════════════════════════════════════════════════════
-    # STEP 9 — Start the pipeline runner
+    # STEP 9 — Run
     # ══════════════════════════════════════════════════════════════════
-    logger.info("🚀  STEP 9 — Starting PipelineRunner … waiting for audio")
+    logger.info("🚀  Pipeline running — waiting for audio")
     logger.info("━" * 60)
 
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
-    logger.info("━" * 60)
-    logger.info(f"✅  Call {call_sid} pipeline finished cleanly")
-    logger.info("━" * 60)
+    logger.info(f"✅  Call {call.call_sid} finished cleanly")
 
 
-# ─── CLI entrypoint (for quick local testing without server.py) ────────────────
+# ─── CLI entrypoint ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Pipecat bot (standalone test mode)")
+    parser = argparse.ArgumentParser(description="Pipecat bot (standalone test)")
     parser.add_argument("--call-data", type=str, default="{}", help="JSON call data")
     args = parser.parse_args()
-
     call_data = json.loads(args.call_data)
-
-    logger.warning("Standalone mode: imports OK. Run via `uvicorn server:app` for real calls.")
-
+    logger.warning("Standalone mode: run via `uvicorn server:app` for real calls.")
