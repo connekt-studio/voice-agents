@@ -67,7 +67,7 @@ class SarvamTTSService(TTSService):
         *,
         api_key: str | None = None,
         speaker: str = "pooja",
-        language: str = "bn-IN",
+        language: str = "bn-BN",
         model: str = "bulbul:v3",
         pace: float = 1.0,
         sample_rate: int = 8000,
@@ -205,8 +205,9 @@ class SarvamTTSService(TTSService):
                 None, self._mp3_to_pcm, mp3_data, self._out_sample_rate
             )
 
-            # Emit in 20 ms frames (160 samples × 2 bytes = 320 bytes at 8 kHz)
-            frame_bytes = int(self._out_sample_rate * 0.02) * 2  # 320 bytes
+            # Emit in 10 ms frames (80 samples × 2 bytes = 160 bytes at 8 kHz)
+            # Smaller frames = faster initial playback, lower perceived latency
+            frame_bytes = int(self._out_sample_rate * 0.01) * 2  # 160 bytes
             for offset in range(0, len(pcm_data), frame_bytes):
                 chunk = pcm_data[offset : offset + frame_bytes]
                 if chunk:
