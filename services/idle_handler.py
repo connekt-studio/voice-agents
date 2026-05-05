@@ -27,10 +27,14 @@ _PROMPTS = [
 
 
 class IdleHandler:
-    def __init__(self, task):
+    def __init__(self, task=None):
         self._task = task
         self._retry_count = 0
         self._timer: asyncio.Task | None = None
+
+    def set_task(self, task) -> None:
+        """Set the pipeline task after it's created (avoids circular dependency)."""
+        self._task = task
 
     def arm(self) -> None:
         """Start (or restart) the idle timer. Call after bot finishes speaking."""

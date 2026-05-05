@@ -51,7 +51,7 @@ class SarvamTTSService(TTSService):
     speaker : str
         Sarvam voice name, e.g. "pooja", "meera", "arvind", "arjun" …
     language : str
-        BCP-47 language code understood by Sarvam, e.g. "bn-IN".
+        BCP-47 language code understood by Sarvam, e.g. "bn-BD".
     model : str
         Sarvam TTS model, e.g. "bulbul:v3".
     pace : float

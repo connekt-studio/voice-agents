@@ -28,6 +28,7 @@ from services.event_logger import fire_event
 from services.idle_handler import IdleHandler
 from services.vad_service import VADService
 from services.tts_gate import TTSGateProcessor
+from services.user_speech_detector import UserSpeechDetector
 from services import db, slack_service
 
 load_dotenv(override=True)
@@ -123,19 +124,29 @@ async def run_bot(websocket, call_data: dict | None = None):
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
         speaker="pooja",
-        language="bn-IN",
+        language="bn-BD",
         model="bulbul:v3",
         pace=1.2,
         sample_rate=8000,
     )
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 6 — TTS gate (blocks audio input while AI speaks)
+    # STEP 6 — Idle handler (created before pipeline to avoid circular dep)
     # ══════════════════════════════════════════════════════════════════
-    tts_gate = TTSGateProcessor(transport)
+    idle_handler = IdleHandler()
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 7 — Conversation context with live date/time injection
+    # STEP 7 — TTS gate (blocks audio input while AI speaks)
+    # ══════════════════════════════════════════════════════════════════
+    tts_gate = TTSGateProcessor(transport, on_tts_finished=idle_handler.arm)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 8 — User speech detector (resets idle timer when user speaks)
+    # ══════════════════════════════════════════════════════════════════
+    user_speech = UserSpeechDetector(on_user_speech=idle_handler.reset)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 9 — Conversation context with live date/time injection
     # ══════════════════════════════════════════════════════════════════
     messages = [{"role": "system", "content": _build_system_prompt()}]
 
@@ -144,7 +155,7 @@ async def run_bot(websocket, call_data: dict | None = None):
             "role": "system",
             "content": (
                 f"আপনি {call.called_number} নম্বরে কল করেছেন। "
-                "দ্রুত এবং সংক্ষিপ্ত পরিচয় দিয়ে শুরু করুন — 'ওয়ালাইকুম আসসালাম! Connekt Studio থেকে বলছি।'"
+                "দ্রুত এবং সংক্ষিপ্ত পরিচয় দিয়ে শুরু করুন — 'আসসালামু আলাইকুম! কানেক্ট স্টুডিও থেকে বলছি।'"
             ),
         })
     elif call.caller_number and call.caller_number != "unknown":
@@ -157,11 +168,12 @@ async def run_bot(websocket, call_data: dict | None = None):
     context_aggregator = llm.create_context_aggregator(context)
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 8 — Pipeline
+    # STEP 10 — Pipeline
     # ══════════════════════════════════════════════════════════════════
     pipeline = Pipeline([
         transport.input(),
         stt,
+        user_speech,
         context_aggregator.user(),
         llm,
         tts,
@@ -171,7 +183,7 @@ async def run_bot(websocket, call_data: dict | None = None):
     ])
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 9 — Pipeline task
+    # STEP 11 — Pipeline task
     # ══════════════════════════════════════════════════════════════════
     task = PipelineTask(
         pipeline,
@@ -184,10 +196,11 @@ async def run_bot(websocket, call_data: dict | None = None):
         ),
     )
 
-    idle_handler = IdleHandler(task)
+    # Link task to idle_handler now that both exist
+    idle_handler.set_task(task)
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 10 — Event handlers
+    # STEP 12 — Event handlers
     # ══════════════════════════════════════════════════════════════════
 
     @transport.event_handler("on_client_connected")
@@ -202,15 +215,13 @@ async def run_bot(websocket, call_data: dict | None = None):
         from pipecat.frames.frames import TTSSpeakFrame
         # Instant TTS greeting bypasses LLM latency — caller hears audio in ~500ms
         greeting = (
-            "ওয়ালাইকুম আসসালাম! Connekt Studio থেকে বলছি। "
+            "আসসালামু আলাইকুম! কানেক্ট স্টুডিও থেকে বলছি। "
             "বলুন, কিভাবে সাহায্য করতে পারি?"
         )
         await task.queue_frames([
             TTSSpeakFrame(text=greeting),
             context_aggregator.user().get_context_frame(),
         ])
-        # Start silence detection after greeting is queued
-        idle_handler.arm()
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(transport, websocket):
@@ -249,7 +260,7 @@ async def run_bot(websocket, call_data: dict | None = None):
         await task.cancel()
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 11 — Run
+    # STEP 13 — Run
     # ══════════════════════════════════════════════════════════════════
     logger.info("🚀  Pipeline running — waiting for audio")
     logger.info("━" * 60)
