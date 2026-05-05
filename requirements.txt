@@ -19,3 +19,7 @@ websockets>=12.0
 
 # Direct SIP calling (no Asterisk needed)
 pyVoIP>=1.6.8
+
+# Sarvam TTS — MP3 decode + HTTP streaming
+pydub>=0.25.1
+requests>=2.31.0

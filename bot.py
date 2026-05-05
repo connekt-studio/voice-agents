@@ -14,7 +14,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.deepgram.tts import DeepgramTTSService
+from sarvam_tts import SarvamTTSService
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -164,15 +164,20 @@ async def run_bot(websocket, call_data: dict | None = None):
     )
     logger.info("    ✅ LLM ready")
 
-    logger.info("🔊  STEP 4c — Initializing Deepgram TTS (Text → Speech)")
-    logger.info("    voice      : aura-asteria-en")
+    logger.info("🔊  STEP 4c — Initializing Sarvam TTS (Text → Bangla Speech)")
+    logger.info("    model      : bulbul:v3")
+    logger.info("    speaker    : pooja")
+    logger.info("    language   : bn-IN")
     logger.info("    sample_rate: 8000 Hz")
-    tts = DeepgramTTSService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        voice="aura-asteria-en",
+    tts = SarvamTTSService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        speaker="pooja",
+        language="bn-IN",
+        model="bulbul:v3",
+        pace=1.0,
         sample_rate=8000,
     )
-    logger.info("    ✅ TTS ready")
+    logger.info("    ✅ Sarvam TTS ready")
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 5 — Build conversation context
@@ -212,7 +217,7 @@ async def run_bot(websocket, call_data: dict | None = None):
     logger.info("    → Deepgram STT  (speech → text)")
     logger.info("    → LLM context user aggregator")
     logger.info("    → OpenAI GPT-4o  (generates reply)")
-    logger.info("    → Deepgram TTS  (text → speech)")
+    logger.info("    → Sarvam TTS bulbul:v3  (text → Bangla speech)")
     logger.info("    → WebSocket audio out")
     logger.info("    → LLM context assistant aggregator")
 
