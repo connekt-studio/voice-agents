@@ -124,7 +124,7 @@ async def run_bot(websocket, call_data: dict | None = None):
     tts = SarvamTTSService(
         api_key=os.getenv("SARVAM_API_KEY"),
         speaker="pooja",
-        language="bn-BD",
+        language="bn-IN",
         model="bulbul:v3",
         pace=1.2,
         sample_rate=8000,
@@ -136,9 +136,9 @@ async def run_bot(websocket, call_data: dict | None = None):
     idle_handler = IdleHandler()
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 7 — TTS gate (blocks audio input while AI speaks)
+    # STEP 7 — TTS gate (arms idle handler after AI finishes speaking)
     # ══════════════════════════════════════════════════════════════════
-    tts_gate = TTSGateProcessor(transport, on_tts_finished=idle_handler.arm)
+    tts_gate = TTSGateProcessor(on_tts_finished=idle_handler.arm)
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 8 — User speech detector (resets idle timer when user speaks)
@@ -188,7 +188,7 @@ async def run_bot(websocket, call_data: dict | None = None):
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
-            allow_interruptions=True,
+            allow_interruptions=False,
             enable_metrics=True,
             enable_usage_logging=True,
             audio_in_sample_rate=8000,
