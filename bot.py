@@ -29,6 +29,7 @@ from services.idle_handler import IdleHandler
 from services.vad_service import VADService
 from services.tts_gate import TTSGateProcessor
 from services.user_speech_detector import UserSpeechDetector
+from services.ai_logger import AILogger
 from services import db, slack_service
 
 load_dotenv(override=True)
@@ -136,9 +137,9 @@ async def run_bot(websocket, call_data: dict | None = None):
     idle_handler = IdleHandler()
 
     # ══════════════════════════════════════════════════════════════════
-    # STEP 7 — TTS gate (arms idle handler after AI finishes speaking)
+    # STEP 7 — TTS gate (VAD profile switching + idle handler callback)
     # ══════════════════════════════════════════════════════════════════
-    tts_gate = TTSGateProcessor(on_tts_finished=idle_handler.arm)
+    tts_gate = TTSGateProcessor(vad_service=vad_svc, on_tts_finished=idle_handler.arm)
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 8 — User speech detector (resets idle timer when user speaks)
@@ -155,7 +156,8 @@ async def run_bot(websocket, call_data: dict | None = None):
             "role": "system",
             "content": (
                 f"আপনি {call.called_number} নম্বরে কল করেছেন। "
-                "দ্রুত এবং সংক্ষিপ্ত পরিচয় দিয়ে শুরু করুন — 'আসসালামু আলাইকুম! কানেক্ট স্টুডিও থেকে বলছি।'"
+                "আপনি ইতিমধ্যেই অভ্যর্থনা জানিয়েছেন — পুনরাবৃত্তি করবেন না। "
+                "এখন কলারের প্রশ্নের অপেক্ষা করুন।"
             ),
         })
     elif call.caller_number and call.caller_number != "unknown":
@@ -176,6 +178,7 @@ async def run_bot(websocket, call_data: dict | None = None):
         user_speech,
         context_aggregator.user(),
         llm,
+        AILogger(),
         tts,
         tts_gate,
         transport.output(),
@@ -220,7 +223,6 @@ async def run_bot(websocket, call_data: dict | None = None):
         )
         await task.queue_frames([
             TTSSpeakFrame(text=greeting),
-            context_aggregator.user().get_context_frame(),
         ])
 
     @transport.event_handler("on_client_disconnected")

@@ -1,13 +1,13 @@
 """
-TTS Gate Processor — watches for TTS stop events and fires callbacks.
+TTS Gate Processor — prevents audio echo loops and arms idle handler.
 
-Used to arm the idle handler only AFTER the AI finishes speaking,
-rather than when speech is merely queued.
+Switches VAD profiles when the bot is speaking to suppress TTS echo
+from being detected as user speech, which causes the AI to repeat itself.
 """
 
 from typing import Callable
 
-from pipecat.frames.frames import Frame, TTSStoppedFrame
+from pipecat.frames.frames import Frame, TTSStartedFrame, TTSStoppedFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from loguru import logger
@@ -15,22 +15,25 @@ from loguru import logger
 
 class TTSGateProcessor(FrameProcessor):
     """
-    Watches for TTS stop frames and fires on_tts_finished callback.
+    Watches for TTS start/stop frames and switches VAD profiles:
 
-    Does NOT toggle audio_in — use allow_interruptions=False in
-    PipelineParams instead, which prevents user speech from
-    interrupting the bot at the framework level.
+    - TTSStartedFrame  → VAD "agent_turn" (high threshold, filters echo)
+    - TTSStoppedFrame  → VAD "normal" + fires on_tts_finished callback
     """
 
-    def __init__(self, on_tts_finished: Callable):
+    def __init__(self, vad_service, on_tts_finished: Callable):
         super().__init__()
+        self._vad = vad_service
         self._on_tts_finished = on_tts_finished
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, TTSStoppedFrame):
-            logger.debug("[TTSGate] TTS stopped — firing callback")
+        if isinstance(frame, TTSStartedFrame):
+            await self._vad.set_profile("agent_turn")
+
+        elif isinstance(frame, TTSStoppedFrame):
+            await self._vad.set_profile("normal")
             self._on_tts_finished()
 
         await self.push_frame(frame, direction)

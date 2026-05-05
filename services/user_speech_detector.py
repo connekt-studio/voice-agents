@@ -26,8 +26,14 @@ class UserSpeechDetector(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
-            logger.debug("[UserSpeechDetector] user speech detected — resetting idle timer")
+        if isinstance(frame, TranscriptionFrame):
+            text = getattr(frame, "text", "")
+            logger.info(f"[🎤 User] TRANSCRIPT: {text!r}")
+            self._on_user_speech()
+
+        elif isinstance(frame, InterimTranscriptionFrame):
+            text = getattr(frame, "text", "")
+            logger.debug(f"[🎤 User] interim: {text!r}")
             self._on_user_speech()
 
         await self.push_frame(frame, direction)
