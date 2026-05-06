@@ -9,3 +9,4 @@ gcp-svc-acct.json/
 dist/
 build/
 .DS_Store
+gcp-svc-acct.json
