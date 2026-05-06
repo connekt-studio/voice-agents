@@ -14,8 +14,8 @@ from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from sarvam_tts import SarvamTTSService
-from sarvam_stt import SarvamSTTService
+
+# from sarvam_stt import SarvamSTTService  # rate-limited, switched to Google
 from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.websocket.fastapi import (
     FastAPIWebsocketParams,
@@ -30,7 +30,12 @@ from services.vad_service import VADService
 from services.tts_gate import TTSGateProcessor
 from services.user_speech_detector import UserSpeechDetector
 from services.ai_logger import AILogger
+from services.resample_filter import ResampleFilter
 from services import db, slack_service
+from pipecat.services.google import GeminiTTSService
+from pipecat.services.google.stt import GoogleSTTService
+
+from pipecat.transcriptions.language import Language
 
 load_dotenv(override=True)
 
@@ -111,11 +116,20 @@ async def run_bot(websocket, call_data: dict | None = None):
     # ══════════════════════════════════════════════════════════════════
     # STEP 4 — AI services
     # ══════════════════════════════════════════════════════════════════
-    stt = SarvamSTTService(
-        api_key=os.getenv("SARVAM_API_KEY"),
-        language="bn-IN",
-        model="saaras:v3",
-        sample_rate=8000,
+    gcp_creds = os.getenv("GOOGLE_CREDENTIALS", "").strip().strip("'\"")
+    credentials_path = gcp_creds if os.path.isfile(gcp_creds) else os.path.join(os.getcwd(), "gcp-svc-acct.json")
+
+    stt = GoogleSTTService(
+        credentials_path=credentials_path,
+        settings=GoogleSTTService.Settings(
+        languages=[Language.BN_BD,Language.EN_US],
+        model="latest_long",
+        enable_automatic_punctuation=True,
+        enable_word_time_offsets=True,
+        enable_word_confidence=True,
+    ),
+       
+        
     )
 
     llm = OpenAILLMService(
@@ -123,14 +137,17 @@ async def run_bot(websocket, call_data: dict | None = None):
         model="gpt-4.1-mini",
     )
 
-    tts = SarvamTTSService(
-        api_key=os.getenv("SARVAM_API_KEY"),
-        speaker="pooja",
-        language="bn-IN",
-        model="bulbul:v3",
-        pace=1.2,
-        sample_rate=8000,
+    tts = GeminiTTSService(
+        credentials_path=credentials_path,
+         settings=GeminiTTSService.Settings(
+            model="gemini-2.5-flash-tts",
+            voice="Kore",
+            language=Language.BN_BD,
+            prompt="Say this in a friendly and helpful tone"
+        )
+       
     )
+  
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 6 — Idle handler (created before pipeline to avoid circular dep)
@@ -141,6 +158,11 @@ async def run_bot(websocket, call_data: dict | None = None):
     # STEP 7 — TTS gate (VAD profile switching + idle handler callback)
     # ══════════════════════════════════════════════════════════════════
     tts_gate = TTSGateProcessor(vad_service=vad_svc, on_tts_finished=idle_handler.arm)
+
+    # ══════════════════════════════════════════════════════════════════
+    # STEP 8 — Resample filter (Gemini 24kHz → pipeline 8kHz)
+    # ══════════════════════════════════════════════════════════════════
+    resample = ResampleFilter(input_rate=24000, output_rate=8000)
 
     # ══════════════════════════════════════════════════════════════════
     # STEP 8 — User speech detector (resets idle timer when user speaks)
@@ -181,6 +203,7 @@ async def run_bot(websocket, call_data: dict | None = None):
         llm,
         AILogger(),
         tts,
+        resample,
         tts_gate,
         transport.output(),
         context_aggregator.assistant(),
