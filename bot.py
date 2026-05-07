@@ -33,8 +33,7 @@ from services.ai_logger import AILogger
 from services.resample_filter import ResampleFilter
 from services import db, slack_service
 from pipecat.services.google import GeminiTTSService
-from pipecat.services.google.stt import GoogleSTTService
-
+from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.transcriptions.language import Language
 
 load_dotenv(override=True)
@@ -119,18 +118,14 @@ async def run_bot(websocket, call_data: dict | None = None):
     gcp_creds = os.getenv("GOOGLE_CREDENTIALS", "").strip().strip("'\"")
     credentials_path = gcp_creds if os.path.isfile(gcp_creds) else os.path.join(os.getcwd(), "gcp-svc-acct.json")
 
-    stt = GoogleSTTService(
-        credentials_path=credentials_path,
-        settings=GoogleSTTService.Settings(
-        languages=[Language.BN_BD,Language.EN_US],
-        model="latest_long",
-        enable_automatic_punctuation=True,
-        enable_word_time_offsets=True,
-        enable_word_confidence=True,
-    ),
-       
-        
-    )
+    stt = SarvamSTTService(
+    api_key=os.getenv("SARVAM_API_KEY"),
+    mode="transcribe",
+    model="saaras:v3",
+    language=Language.BN_IN,
+    prompt="Transcribe Bangla conversation.",
+    
+)
 
     llm = OpenAILLMService(
         api_key=os.getenv("OPENAI_API_KEY"),
@@ -139,13 +134,12 @@ async def run_bot(websocket, call_data: dict | None = None):
 
     tts = GeminiTTSService(
         credentials_path=credentials_path,
-         settings=GeminiTTSService.Settings(
-            model="gemini-2.5-flash-tts",
-            voice="Kore",
+        model="gemini-2.5-flash-tts",
+        voice_id="Kore",
+        params=GeminiTTSService.InputParams(
             language=Language.BN_BD,
-            prompt="Say this in a friendly and helpful tone"
-        )
-       
+            prompt="Say this in a friendly and helpful tone",
+        ),
     )
   
 
@@ -294,7 +288,7 @@ async def run_bot(websocket, call_data: dict | None = None):
     runner = PipelineRunner(handle_sigint=False)
     await runner.run(task)
 
-    logger.info(f"✅  Call {call.call_sid} finished cleanly")
+    logger.info(f"✅ Call {call.call_sid} finished cleanly")
 
 
 # ─── CLI entrypoint ────────────────────────────────────────────────────────────
