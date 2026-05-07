@@ -7,6 +7,6 @@ venv/
 *.egg-info/
 dist/
 build/
-.DS_Store
+.DS_Store/
 gcp-svc-acct.json
 *.json.key
